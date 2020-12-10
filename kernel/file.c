@@ -16,7 +16,7 @@
 struct devsw devsw[NDEV];
 struct {
   struct spinlock lock;
-  struct file file[NFILE];
+  // struct file file[NFILE];
 } ftable;
 
 void
@@ -32,13 +32,25 @@ filealloc(void)
   struct file *f;
 
   acquire(&ftable.lock);
-  for(f = ftable.file; f < ftable.file + NFILE; f++){
-    if(f->ref == 0){
-      f->ref = 1;
+  // for(f = ftable.file; f < ftable.file + NFILE; f++){
+  //   if(f->ref == 0){
+  //     f->ref = 1;
+  //     release(&ftable.lock);
+  //     return f;
+  //   }
+  // }
+
+  // 用bd_malloc动态申请文件描述符
+  f = bd_malloc(sizeof(struct file));  
+
+  // 分配成功
+  if(f){
+      f->ref = 1;  // 引用计数：表明有多少其他的对象目前正保留一个对它的引用
       release(&ftable.lock);
       return f;
-    }
   }
+
+  // 分配失败，找不到满足要求的块
   release(&ftable.lock);
   return 0;
 }
@@ -71,8 +83,11 @@ fileclose(struct file *f)
   ff = *f;
   f->ref = 0;
   f->type = FD_NONE;
-  release(&ftable.lock);
 
+  // 用bd_free()释放内存
+  bd_free(f);
+
+  release(&ftable.lock);
   if(ff.type == FD_PIPE){
     pipeclose(ff.pipe, ff.writable);
   } else if(ff.type == FD_INODE || ff.type == FD_DEVICE){
@@ -80,6 +95,8 @@ fileclose(struct file *f)
     iput(ff.ip);
     end_op(ff.ip->dev);
   }
+
+  
 }
 
 // Get metadata about file f.
