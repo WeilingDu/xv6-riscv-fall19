@@ -27,23 +27,28 @@
 struct {
   struct buf buf[NBUF];
   struct buf head[NBUCKETS];
-  struct spinlock lock[NBUCKETS];
+  // bcache.lock用于表示当前访问的bcache缓存块的数据结构是否被锁住
+  // 当bcache.lock为0时表示未锁住，能够访问当前数据结构bcache
+  // 如果为1，即暂时无法获得锁，则不断循环、自旋、等待锁重新可用
+  struct spinlock lock[NBUCKETS];  
 } bcache;
 
-uint
-hash(uint blockno)
+// 将块编号进行哈希
+uint hash(uint blockno)
 {
   return (blockno % NBUCKETS);
 }
 
-void
-binit(void)
+// main.c调用该函数来初始化缓存
+void binit(void)
 {
   struct buf *b;
 
+  // 调用initlock()初始化bcache.lock
   for (int i = 0; i < NBUCKETS; i++)
     initlock(&bcache.lock[i], "bcache_bucket");
 
+  // 循环遍历buf数组，采用头插法逐个链接到bcache.head后面
   for (int i = 0; i < NBUCKETS; i++)
   {
     bcache.head[i].prev = &bcache.head[i];
@@ -64,13 +69,14 @@ binit(void)
 // Look through buffer cache for block on device dev.
 // If not found, allocate a buffer.
 // In either case, return locked buffer.
-static struct buf*
-bget(uint dev, uint blockno)
+// bget()检查请求的磁盘块是否在缓存中
+static struct buf* bget(uint dev, uint blockno)
 {
   struct buf *b;
 
   uint bucketno = hash(blockno);
 
+  // 操作bcache数据结构（修改refcnt、dev、blockno、valid）时，需要获取到自旋锁 bcache.lock，操作完成后再释放该锁
   acquire(&bcache.lock[bucketno]);
 
   // Is the block already cached?
@@ -78,7 +84,8 @@ bget(uint dev, uint blockno)
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
       release(&bcache.lock[bucketno]);
-      acquiresleep(&b->lock);
+      // // 在获取到缓存块（命中的缓存块，或者，未命中时通过LRU算法替换出来缓存中的缓存块）后，调用acquiresleep()获取睡眠锁
+      acquiresleep(&b->lock); 
       return b;
     }
   }
@@ -111,7 +118,7 @@ bget(uint dev, uint blockno)
         b->next->prev = b;
         b->prev->next = b;
         release(&bcache.lock[bucketno]);
-        acquiresleep(&b->lock);
+        acquiresleep(&b->lock);  
         return b;
       }
     }
@@ -122,12 +129,13 @@ bget(uint dev, uint blockno)
 }
 
 // Return a locked buf with the contents of the indicated block.
-struct buf*
-bread(uint dev, uint blockno)
+// 上层文件系统读磁盘时，调用bread()
+struct buf* bread(uint dev, uint blockno)
 {
   struct buf *b;
 
-  b = bget(dev, blockno);
+  b = bget(dev, blockno);  // 调用bget()检查请求的磁盘块是否在缓存中
+  // 如果未命中，调用底层的virtio_disk_rw()函数先将此磁盘块从磁盘加载进缓存中，再返回此磁盘块
   if(!b->valid) {
     virtio_disk_rw(b->dev, b, 0);
     b->valid = 1;
@@ -136,27 +144,32 @@ bread(uint dev, uint blockno)
 }
 
 // Write b's contents to disk.  Must be locked.
-void
-bwrite(struct buf *b)
+// 上层文件写磁盘时，调用bwrite()
+void bwrite(struct buf *b)
 {
+  // 在写入到磁盘之前，先调用holdingsleep()查询是否已经获取到该睡眠锁，确保有带锁而入
   if(!holdingsleep(&b->lock))
     panic("bwrite");
-  virtio_disk_rw(b->dev, b, 1);
+  virtio_disk_rw(b->dev, b, 1);  // 调用virtio_disk_rw()函数直接将缓存中的数据写入磁盘
 }
 
 // Release a locked buffer.
 // Move to the head of the most-recently-used list.
-void
-brelse(struct buf *b)
+// 上层文件系统调用brelse()释放一块不再使用的缓存块
+void brelse(struct buf *b)
 {
+  // 调用holdingsleep()查询是否已经获取到该睡眠锁
+  // 确保有带锁后，才调用releasesleep()释放该锁
   if(!holdingsleep(&b->lock))
     panic("brelse");
 
   releasesleep(&b->lock);
 
   uint bucketno = hash(b->blockno);
+  // 获取到自旋锁后，才能将refcnt（引用计数）减1
   acquire(&bcache.lock[bucketno]);
   b->refcnt--;
+  // 只有在refcnt为0时，将该数据缓存块插入到bcache.head链表后面
   if (b->refcnt == 0) {
     // no one is waiting for it.
     b->next->prev = b->prev;
@@ -166,22 +179,24 @@ brelse(struct buf *b)
     bcache.head[bucketno].next->prev = b;
     bcache.head[bucketno].next = b;
   }
-  
+  // 操作完成后再释放该自旋锁
   release(&bcache.lock[bucketno]);
 }
 
-void
-bpin(struct buf *b) {
+void bpin(struct buf *b) {
   uint bucketno = hash(b->blockno);
+  // 获取到自旋锁后，才能修改refcnt
   acquire(&bcache.lock[bucketno]);
   b->refcnt++;
+  // 操作完成后再释放该自旋锁
   release(&bcache.lock[bucketno]);
 }
 
-void
-bunpin(struct buf *b) {
+void bunpin(struct buf *b) {
   uint bucketno = hash(b->blockno);
+  // 获取到自旋锁后，才能修改refcnt
   acquire(&bcache.lock[bucketno]);
   b->refcnt--;
+  // 操作完成后再释放该自旋锁
   release(&bcache.lock[bucketno]);
 }
