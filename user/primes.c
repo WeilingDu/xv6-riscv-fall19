@@ -56,7 +56,7 @@ int main(void){
     if(fork() == 0){
         close(0);  // 关闭标准输入
         dup(fd[0]);  // 将管道的读端口拷贝在描述符0上
-        close(fd[0]);
+        close(fd[0]);  // 关闭pipe两侧的fd（此时只会移除描述符，不会关闭实际的file对象）
         close(fd[1]);
         primes();
     }else{
